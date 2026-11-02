@@ -378,6 +378,7 @@ void dark_draw()
 #define SLIDE_MS  450
 #define STEP_MS   60                    /* developing per frame while the scene moves */
 #define CALM_MS   250                   /* and while it is still: the dial's hand ticks */
+#define FAST_MS   400                   /* instant: no scene of its own to keep up with */
 
 static int nqueue, qi;
 static char dcim_dir[128];              /* the roll's JPEG folder, or "" */
@@ -387,6 +388,7 @@ static struct fos_dev *dev;
 static int frame_t0;
 static int total_frames, done_frames, failed_frames, rolls_done;
 static int finished, asking_stop;
+static int dev_fast;                    /* System > Develop rolls > Instant: no scene, a bar */
 static struct spring stop_sheet;
 static int dv_t;
 
@@ -616,8 +618,70 @@ static void develop_bake()
     ui_to_bg(0);
 }
 
+/* ---------------------------------------------------------------- instant */
+
+/* Instant development: the same work the darkroom does, without the theatre.
+ * A bar and a count while the frames go through; when the roll is done the
+ * shelf is back, ready for the next one. */
+
+#define FAST_BAR_X  120
+#define FAST_BAR_Y  222
+#define FAST_BAR_W  (FOS_W - 2 * FAST_BAR_X)
+#define FAST_BAR_H  12
+
+static void fast_bake()
+{
+    char title[48];
+    if (nqueue) snprintf(title, sizeof(title), "Developing roll %03d", queue[0]);
+    else snprintf(title, sizeof(title), "Developing");
+    ui_bg_plain();
+    ui_to_bg(1);
+    ui_status_bar("DARKROOM");
+    fos_text_c(cv, &fos_font_lg, FOS_W / 2, 168, title, C_TEXT, OPAQUE, 0);
+    struct hint h[] = { { "MENU", "Stop" } };
+    ui_hints(h, 1);
+    ui_to_bg(0);
+    ui_damage(FAST_BAR_Y - 8, FAST_BAR_Y + FAST_BAR_H + 30);
+}
+
+static int fast_last = -2;              /* the bar's last position */
+
+static void fast_draw()
+{
+    if (ui_clobbered)
+    {
+        ui_clobbered = 0;
+        ui_bg_restore(0, 0, FOS_W, FOS_H);
+        fast_bake();
+        ui_damage_all();                /* the sheet may have been over it */
+        fast_last = -2;
+    }
+    int p = dev ? fos_dev_progress(dev) : 0;
+    if (p < 0) p = 0;
+    int total = total_frames > 0 ? total_frames : 1;
+    int done = done_frames * 1000 + (p < 1000 ? p : 1000);
+    int frac = done / total;
+    if (frac > 1000) frac = 1000;
+    if (frac != fast_last)
+    {
+        fast_last = frac;
+        ui_bg_restore(FAST_BAR_X, FAST_BAR_Y, FAST_BAR_W, FAST_BAR_H + 26);
+        fos_fill(cv, FAST_BAR_X, FAST_BAR_Y, FAST_BAR_W, FAST_BAR_H, C_LINE);
+        int w = FAST_BAR_W * frac / 1000;
+        if (w > 0) fos_fill(cv, FAST_BAR_X, FAST_BAR_Y, w, FAST_BAR_H, C_ACCENT);
+        char b[48];
+        snprintf(b, sizeof(b), "%d of %d", done_frames, total_frames);
+        fos_text_c(cv, &fos_font_sm, FOS_W / 2, FAST_BAR_Y + FAST_BAR_H + 8, b, C_TEXT2, OPAQUE, 0);
+        ui_damage(FAST_BAR_Y, FAST_BAR_Y + FAST_BAR_H + 26);
+    }
+    if (stop_sheet.x > 0.002f)
+        ui_sheet(stop_sheet.x, "Stop developing?", "The prints made so far are kept; the rest wait in the darkroom.", "Stop", "Keep going");
+}
+
 void develop_enter(int arg)
 {
+    dev_fast = arg == 1;
+    fast_last = -2;
     if (!dark_mem()) nqueue = 0;
     rescan();
     total_frames = done_frames = failed_frames = rolls_done = 0;
@@ -646,7 +710,7 @@ void develop_enter(int arg)
     fos_lab_cache_dir(dir, sizeof(dir));
     fos_dev_cache(dir);
     if (!finished) fos_port_action(FA_BUSY, 1, 0);
-    develop_bake();
+    if (dev_fast) fast_bake(); else develop_bake();
 }
 
 void develop_leave()
@@ -688,6 +752,12 @@ void develop_key(int k)
 int develop_update(int dt)
 {
     dv_t += dt;
+    /* instant: a finished roll takes itself back to the shelf */
+    if (dev_fast && finished && !asking_stop && ui_settled() && stop_sheet.x < 0.002f)
+    {
+        ui_go(SCR_SHELF, 1, GO_FADE);
+        return 1;
+    }
     if (!ghost || !img || !dry || !dm)
     {
         /* no memory for the scene: say so and stop */
@@ -701,17 +771,18 @@ int develop_update(int dt)
         if (dev)
         {
             /* the work takes nearly all of a frame when nothing on the
-             * screen moves but the dial's hand */
-            int calm = (tray == TRAY_LATENT || tray == TRAY_EMPTY) && dry_t >= SLIDE_MS + 100
-                       && stop_sheet.x < 0.002f;
-            int p = fos_dev_step(dev, calm ? CALM_MS : STEP_MS);
-            if (p >= 0 && p < 1000 && !ghost_final && fos_dev_doing(dev) == FOS_DEV_FIXING)
+             * screen moves but the dial's hand; instant development has no
+             * scene to keep up, so it takes bigger bites */
+            int calm = dev_fast || ((tray == TRAY_LATENT || tray == TRAY_EMPTY) && dry_t >= SLIDE_MS + 100
+                                    && stop_sheet.x < 0.002f);
+            int p = fos_dev_step(dev, calm ? (dev_fast ? FAST_MS : CALM_MS) : STEP_MS);
+            if (!dev_fast && p >= 0 && p < 1000 && !ghost_final && fos_dev_doing(dev) == FOS_DEV_FIXING)
             {
                 /* the whole latent image, while it can still be read */
                 ghost_final = 1;
                 if (fos_dev_preview(dev, ghost, GHOST_W, GHOST_H) && (tray == TRAY_LATENT || tray == TRAY_IN)) tray_dirty = 1;
             }
-            else if (p >= 0 && p < 1000 && ghost_t > 600 && fos_dev_preview(dev, ghost, GHOST_W, GHOST_H))
+            else if (!dev_fast && p >= 0 && p < 1000 && ghost_t > 600 && fos_dev_preview(dev, ghost, GHOST_W, GHOST_H))
             {
                 /* the latent image so far; the paper shows it when it is in the bath */
                 ghost_t = 0;
@@ -722,46 +793,49 @@ int develop_update(int dt)
         }
     }
 
-    /* the tray */
-    tray_t += dt;
-    ghost_t += dt;
-    switch (tray)
+    if (!dev_fast)
     {
-        case TRAY_LATENT:
-            if (pending_frame)
-            {
-                load_tray_image(pending_path);
-                tray = TRAY_EMERGE; tray_t = 0;
+        /* the tray */
+        tray_t += dt;
+        ghost_t += dt;
+        switch (tray)
+        {
+            case TRAY_LATENT:
+                if (pending_frame)
+                {
+                    load_tray_image(pending_path);
+                    tray = TRAY_EMERGE; tray_t = 0;
+                    tray_dirty = 1;
+                }
+                break;
+            case TRAY_EMERGE:
                 tray_dirty = 1;
-            }
-            break;
-        case TRAY_EMERGE:
-            tray_dirty = 1;
-            if (tray_t > EMERGE_MS) { tray = TRAY_HOLD; tray_t = 0; }
-            break;
-        case TRAY_HOLD:
-            if (tray_t > HOLD_MS) { tray = TRAY_LIFT; tray_t = 0; }
-            break;
-        case TRAY_LIFT:
-            tray_dirty = 1;
-            if (tray_t > LIFT_MS)
-            {
-                pending_frame = 0;
-                tray = finished ? TRAY_EMPTY : TRAY_IN;
-                tray_t = 0;
-                ghost_t = 100000;
-            }
-            break;
-        case TRAY_IN:
-            tray_dirty = 1;
-            if (tray_t > SLIDE_MS) { tray = TRAY_LATENT; tray_t = 0; }
-            break;
-        case TRAY_EMPTY:
-            break;
+                if (tray_t > EMERGE_MS) { tray = TRAY_HOLD; tray_t = 0; }
+                break;
+            case TRAY_HOLD:
+                if (tray_t > HOLD_MS) { tray = TRAY_LIFT; tray_t = 0; }
+                break;
+            case TRAY_LIFT:
+                tray_dirty = 1;
+                if (tray_t > LIFT_MS)
+                {
+                    pending_frame = 0;
+                    tray = finished ? TRAY_EMPTY : TRAY_IN;
+                    tray_t = 0;
+                    ghost_t = 100000;
+                }
+                break;
+            case TRAY_IN:
+                tray_dirty = 1;
+                if (tray_t > SLIDE_MS) { tray = TRAY_LATENT; tray_t = 0; }
+                break;
+            case TRAY_EMPTY:
+                break;
+        }
+        if (finished && tray == TRAY_LATENT && !pending_frame) { tray = TRAY_EMPTY; tray_dirty = 1; }
+        if (dry_t < SLIDE_MS + 100) { dry_t += dt; line_dirty = 1; }
+        else dry_t += dt;
     }
-    if (finished && tray == TRAY_LATENT && !pending_frame) { tray = TRAY_EMPTY; tray_dirty = 1; }
-    if (dry_t < SLIDE_MS + 100) { dry_t += dt; line_dirty = 1; }
-    else dry_t += dt;
     int moving = spring_step(&stop_sheet, asking_stop ? 1 : 0, dt, 3.0f, 0.95f);
     if (moving) ui_clobbered = 1;
     return 1;           /* the timer's hand keeps going */
@@ -1004,6 +1078,7 @@ static void develop_hints()
 void develop_draw()
 {
     static int was_finished = -1;
+    if (dev_fast) { fast_draw(); return; }
     if (ui_clobbered)
     {
         ui_clobbered = 0;

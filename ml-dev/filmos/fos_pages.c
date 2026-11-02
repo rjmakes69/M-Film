@@ -286,7 +286,7 @@ enum { IT_TOGGLE, IT_CHOICE, IT_FSTOP, IT_ACTION, IT_INFO, IT_LEVEL, IT_PAGE };
 
 #define PAGE_SYSTEM  2
 #define PAGE_SCREEN  3
-#define SYS_SCREEN_ROW 2                /* where Screen colour sits in System */
+#define SYS_SCREEN_ROW 4                /* where Screen colour sits in System */
 #define ACT_SCR_RESET 100               /* handled here, not by the port */
 
 struct item
@@ -303,6 +303,7 @@ static const char *const wind_choices[] = { "Off", "Reminder", "Locks shutter" }
 static const char *const apkey_choices[] = { "Dial in Av", "Up / Down", "Menu only" };
 static const char *const start_choices[] = { "Off", "When no film", "Always" };
 static const char *const mode_choices[] = { "Basic", "Realistic" };
+static const char *const develop_choices[] = { "In the darkroom", "Instant" };
 
 static const struct item finder_items[] =
 {
@@ -322,7 +323,8 @@ static const struct item lens_items[] =
 
 static const struct item system_items[] =
 {
-    { "Film mode", IT_CHOICE, FS_MODE, mode_choices, 2, "Basic: a finished roll goes straight to the darkroom. Realistic: rewind it first." },
+    { "Film mode", IT_CHOICE, FS_MODE, mode_choices, 2, "Basic: a finished roll needs no rewinding to watch. Realistic: rewind it on the roll page, and watch it go." },
+    { "Develop rolls", IT_CHOICE, FS_DEVELOP, develop_choices, 2, "Instant: a finished roll develops by itself, with a progress bar. In the darkroom: it waits for you." },
     { "Start screen", IT_CHOICE, FS_STARTUP, start_choices, 3, "The film shelf when the camera turns on." },
     { "Boot animation", IT_TOGGLE, FS_BOOTANIM, 0, 0, "The aperture opening on the name at power on." },
     { "Screen colour", IT_PAGE, PAGE_SCREEN, 0, 0, "Match these colours to what you see around you." },
@@ -349,7 +351,7 @@ static const struct { const char *title; const char *sub; const struct item *ite
 {
     { "Viewfinder", "What you see in LiveView while you shoot", finder_items, 4 },
     { "Lens", "Aperture for manual lenses", lens_items, 4 },
-    { "System", "Film mode, screen colour, start up and the Canon menu", system_items, 10 },
+    { "System", "Film mode, developing, screen colour, start up and the Canon menu", system_items, 11 },
     { "Screen colour", "Live: the whole film OS changes as you go", screen_items, 5 },
 };
 
@@ -914,13 +916,14 @@ void roll_enter(int arg)
     rewinding = 0;
     roll_bake();
 
-    /* Basic mode: a finished roll goes straight to the darkroom, with no
-     * end-of-roll sheet to answer (the same as pressing SET on it) */
-    if (asking_rewind && !ui_realistic())
+    /* System > Develop rolls > Instant: a finished roll goes straight to
+     * the darkroom, with no end-of-roll sheet to answer (the same as
+     * pressing SET on it) */
+    if (asking_rewind && fos_port_get(FS_DEVELOP) == 1)
     {
         asking_rewind = 0;
         rewinding = 1;
-        rewind_t = 1500;                    /* Basic: no rewinding to watch */
+        rewind_t = ui_realistic() ? 0 : 1500;   /* Basic: no rewinding to watch */
         rewind_then = 1;                    /* develop it */
         rewind_number = ui_roll.number;
         fos_port_action(FA_REWIND, 0, 0);
@@ -978,7 +981,7 @@ int roll_update(int dt)
             {
                 dark_queue_clear();
                 dark_queue_add(rewind_number);
-                ui_go(SCR_DEVELOP, 0, GO_FADE);
+                ui_go(SCR_DEVELOP, fos_port_get(FS_DEVELOP) == 1, GO_FADE);
             }
             else ui_go(SCR_SHELF, 1, GO_PUSH);
             return 1;

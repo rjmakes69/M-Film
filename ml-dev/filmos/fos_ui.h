@@ -128,7 +128,8 @@ void dark_key(int key);
 int  dark_update(int dt);
 void dark_draw();
 
-/* developing the rolls queued with dark_queue (arg unused) */
+/* developing the rolls queued with dark_queue: arg 0 the darkroom scene,
+ * arg 1 instant (a progress bar, then the shelf) */
 void dark_queue_clear();
 void dark_queue_add(int roll);
 void develop_enter(int arg);
